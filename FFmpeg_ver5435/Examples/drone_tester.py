@@ -28,7 +28,25 @@ VIDEO_HEIGHT = 480
 FFMPEG_PATH = "ffmpeg"  # 환경변수 등록 시 ffmpeg만 입력 가능
 
 # --- ArUco 마커 설정 ---
-ARUCO_DICT = cv2.aruco.DICT_4X4_50
+# 여러 ArUco 사전을 시도하도록 설정 (자동 탐지)
+ARUCO_DICTS = [
+    cv2.aruco.DICT_4X4_50,
+    cv2.aruco.DICT_4X4_100,
+    cv2.aruco.DICT_4X4_250,
+    cv2.aruco.DICT_4X4_1000,
+    cv2.aruco.DICT_5X5_50,
+    cv2.aruco.DICT_5X5_100,
+    cv2.aruco.DICT_5X5_250,
+    cv2.aruco.DICT_5X5_1000,
+    cv2.aruco.DICT_6X6_50,
+    cv2.aruco.DICT_6X6_100,
+    cv2.aruco.DICT_6X6_250,
+    cv2.aruco.DICT_6X6_1000,
+    cv2.aruco.DICT_7X7_50,
+    cv2.aruco.DICT_7X7_100,
+    cv2.aruco.DICT_7X7_250,
+    cv2.aruco.DICT_7X7_1000,
+]
 MARKER_SIZE = 0.1  # 마커 실제 크기 (미터 단위, 예: 10cm)
 
 # --- 캘리브레이션 파일 경로 ---
@@ -121,15 +139,48 @@ class VideoStreamReceiver:
 class ArUcoDetector:
     """
     ArUco 마커 탐지 및 3D 포즈 추정 클래스.
+    여러 ArUco 사전을 자동으로 시도합니다.
     """
-    def __init__(self, dict_type=cv2.aruco.DICT_4X4_50, marker_size=0.1):
-        self.aruco_dict = cv2.aruco.getPredefinedDictionary(dict_type)
-        self.aruco_params = cv2.aruco.DetectorParameters()
-        self.detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
+    def __init__(self, dict_types=None, marker_size=0.1):
+        if dict_types is None:
+            dict_types = [cv2.aruco.DICT_4X4_50]  # 기본값
+        
+        # 여러 사전에 대한 탐지기 생성
+        self.detectors = []
+        self.dict_names = []
+        for dict_type in dict_types:
+            aruco_dict = cv2.aruco.getPredefinedDictionary(dict_type)
+            aruco_params = cv2.aruco.DetectorParameters()
+            detector = cv2.aruco.ArucoDetector(aruco_dict, aruco_params)
+            self.detectors.append(detector)
+            self.dict_names.append(self._get_dict_name(dict_type))
+        
         self.marker_size = marker_size
         self.camera_matrix = None
         self.dist_coeffs = None
-        self.detected_markers = {}  # {id: {"distance": float, "position": (x,y,z)}}
+        self.detected_markers = {}  # {id: {"distance": float, "position": (x,y,z), "dict": str}}
+    
+    def _get_dict_name(self, dict_type):
+        """ArUco 사전 타입 이름 반환"""
+        dict_names = {
+            cv2.aruco.DICT_4X4_50: "4X4_50",
+            cv2.aruco.DICT_4X4_100: "4X4_100",
+            cv2.aruco.DICT_4X4_250: "4X4_250",
+            cv2.aruco.DICT_4X4_1000: "4X4_1000",
+            cv2.aruco.DICT_5X5_50: "5X5_50",
+            cv2.aruco.DICT_5X5_100: "5X5_100",
+            cv2.aruco.DICT_5X5_250: "5X5_250",
+            cv2.aruco.DICT_5X5_1000: "5X5_1000",
+            cv2.aruco.DICT_6X6_50: "6X6_50",
+            cv2.aruco.DICT_6X6_100: "6X6_100",
+            cv2.aruco.DICT_6X6_250: "6X6_250",
+            cv2.aruco.DICT_6X6_1000: "6X6_1000",
+            cv2.aruco.DICT_7X7_50: "7X7_50",
+            cv2.aruco.DICT_7X7_100: "7X7_100",
+            cv2.aruco.DICT_7X7_250: "7X7_250",
+            cv2.aruco.DICT_7X7_1000: "7X7_1000",
+        }
+        return dict_names.get(dict_type, "UNKNOWN")
 
     def load_calibration(self, filepath: str) -> bool:
         """저장된 캘리브레이션 파일을 로드합니다."""
@@ -162,25 +213,47 @@ class ArUcoDetector:
             print(f"[ArUco 오류] 캘리브레이션 저장 실패: {e}")
 
     def detect_markers(self, frame):
-        """프레임에서 ArUco 마커를 탐지하고 3D 포즈를 추정합니다."""
+        """프레임에서 ArUco 마커를 탐지하고 3D 포즈를 추정합니다. 여러 사전을 시도합니다."""
         if frame is None:
             return frame
         
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = self.detector.detectMarkers(gray)
         
         self.detected_markers.clear()
+        all_corners = []
+        all_ids = []
+        all_dict_names = []
         
-        if ids is not None:
+        # 모든 ArUco 사전에 대해 탐지 시도
+        for detector, dict_name in zip(self.detectors, self.dict_names):
+            corners, ids, _ = detector.detectMarkers(gray)
+            if ids is not None:
+                for corner, marker_id in zip(corners, ids.flatten()):
+                    all_corners.append(corner)
+                    all_ids.append(marker_id)
+                    all_dict_names.append(dict_name)
+        
+        # 디버그: 프레임 상태 표시
+        frame_info = f"Frame: {frame.shape[1]}x{frame.shape[0]}"
+        cv2.putText(frame, frame_info, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        
+        if len(all_ids) > 0:
+            # 디버그: 탐지된 마커 개수 출력 (최초 1회)
+            if not hasattr(self, '_first_detection_logged'):
+                print(f"[ArUco] 마커 탐지됨! 총 {len(all_ids)}개")
+                for i, (marker_id, dict_name) in enumerate(zip(all_ids, all_dict_names)):
+                    print(f"  - ID {marker_id} (사전: {dict_name})")
+                self._first_detection_logged = True
             # 마커 테두리 그리기
-            cv2.aruco.drawDetectedMarkers(frame, corners, ids)
+            for corner, marker_id in zip(all_corners, all_ids):
+                cv2.aruco.drawDetectedMarkers(frame, [corner], np.array([[marker_id]]))
             
             # 3D 포즈 추정 (캘리브레이션 데이터가 있는 경우)
             if self.camera_matrix is not None and self.dist_coeffs is not None:
-                for i, marker_id in enumerate(ids.flatten()):
+                for i, (corner, marker_id, dict_name) in enumerate(zip(all_corners, all_ids, all_dict_names)):
                     # 각 마커의 포즈 추정
                     rvec, tvec, _ = cv2.aruco.estimatePoseSingleMarkers(
-                        corners[i], self.marker_size, self.camera_matrix, self.dist_coeffs
+                        corner, self.marker_size, self.camera_matrix, self.dist_coeffs
                     )
                     
                     # 좌표축 그리기
@@ -194,25 +267,30 @@ class ArUcoDetector:
                     # 마커 정보 저장
                     self.detected_markers[int(marker_id)] = {
                         "distance": distance,
-                        "position": (x, y, z)
+                        "position": (x, y, z),
+                        "dict": dict_name
                     }
                     
                     # 텍스트 표시
-                    corner = corners[i][0][0]
-                    text = f"ID:{marker_id} D:{distance:.2f}m"
-                    cv2.putText(frame, text, (int(corner[0]), int(corner[1]) - 10),
+                    corner_pt = corner[0][0]
+                    text = f"ID:{marker_id} D:{distance:.2f}m ({dict_name})"
+                    cv2.putText(frame, text, (int(corner_pt[0]), int(corner_pt[1]) - 10),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                     
                     pos_text = f"X:{x:.2f} Y:{y:.2f} Z:{z:.2f}"
-                    cv2.putText(frame, pos_text, (int(corner[0]), int(corner[1]) - 30),
+                    cv2.putText(frame, pos_text, (int(corner_pt[0]), int(corner_pt[1]) - 30),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
             else:
                 # 캘리브레이션 없이 2D 탐지만
-                for i, marker_id in enumerate(ids.flatten()):
-                    corner = corners[i][0][0]
-                    text = f"ID:{marker_id} (No Calib)"
-                    cv2.putText(frame, text, (int(corner[0]), int(corner[1]) - 10),
+                for corner, marker_id, dict_name in zip(all_corners, all_ids, all_dict_names):
+                    corner_pt = corner[0][0]
+                    text = f"ID:{marker_id} ({dict_name}, No Calib)"
+                    cv2.putText(frame, text, (int(corner_pt[0]), int(corner_pt[1]) - 10),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        else:
+            # 마커가 탐지되지 않음
+            no_marker_text = "No ArUco markers detected"
+            cv2.putText(frame, no_marker_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         
         return frame
 
@@ -285,7 +363,7 @@ class DroneDashboard(tk.Tk):
         
         # 비디오 스트리밍 시스템
         self.video_receiver = None
-        self.aruco_detector = ArUcoDetector(ARUCO_DICT, MARKER_SIZE)
+        self.aruco_detector = ArUcoDetector(ARUCO_DICTS, MARKER_SIZE)
         self.video_running = False
         self.video_window_name = "Drone Camera - ArUco Detection"
 
